@@ -8,7 +8,34 @@ import time
 import threading
 import os
 
-pad = vg.VDS4Gamepad()
+# Type de manette virtuelle : "ps4" ou "xbox".
+# Si Fortnite ne détecte pas la manette sur un PC, essayer l'autre type.
+TYPE_MANETTE = "ps4"
+
+if TYPE_MANETTE == "xbox":
+    pad = vg.VX360Gamepad()
+    _B = vg.XUSB_BUTTON
+    BTN_L3 = _B.XUSB_GAMEPAD_LEFT_THUMB
+    BTN_CROIX = _B.XUSB_GAMEPAD_A
+    BTN_CARRE = _B.XUSB_GAMEPAD_X
+    BTN_TRIANGLE = _B.XUSB_GAMEPAD_Y
+    BTN_OPTIONS = _B.XUSB_GAMEPAD_START
+    BTN_R1 = _B.XUSB_GAMEPAD_RIGHT_SHOULDER
+    BTN_L1 = _B.XUSB_GAMEPAD_LEFT_SHOULDER
+    SENS_Y = -1      # axe Y inversé par rapport à la manette PS4
+else:
+    pad = vg.VDS4Gamepad()
+    _B = vg.DS4_BUTTONS
+    BTN_L3 = _B.DS4_BUTTON_THUMB_LEFT
+    BTN_CROIX = _B.DS4_BUTTON_CROSS
+    BTN_CARRE = _B.DS4_BUTTON_SQUARE
+    BTN_TRIANGLE = _B.DS4_BUTTON_TRIANGLE
+    BTN_OPTIONS = _B.DS4_BUTTON_OPTIONS
+    BTN_R1 = _B.DS4_BUTTON_SHOULDER_RIGHT
+    BTN_L1 = _B.DS4_BUTTON_SHOULDER_LEFT
+    SENS_Y = 1
+print("Manette virtuelle :", TYPE_MANETTE)
+
 running = False
 etat = "rien"          # "rien", "searching", "menu", "rewards", "skip", "replay", "actif", "session"
 
@@ -35,13 +62,6 @@ IMAGE_REWARDS = "rewards.png"
 IMAGE_REPLAY = "replay.png"
 IMAGE_SKIP = "skip.png"
 
-BTN_L3 = vg.DS4_BUTTONS.DS4_BUTTON_THUMB_LEFT
-BTN_CROIX = vg.DS4_BUTTONS.DS4_BUTTON_CROSS
-BTN_CARRE = vg.DS4_BUTTONS.DS4_BUTTON_SQUARE
-BTN_TRIANGLE = vg.DS4_BUTTONS.DS4_BUTTON_TRIANGLE
-BTN_OPTIONS = vg.DS4_BUTTONS.DS4_BUTTON_OPTIONS
-BTN_R1 = vg.DS4_BUTTONS.DS4_BUTTON_SHOULDER_RIGHT
-BTN_L1 = vg.DS4_BUTTONS.DS4_BUTTON_SHOULDER_LEFT
 
 # ---------- OUTILS ----------
 
@@ -68,8 +88,8 @@ def rnd(a, b):
 
 def set_sticks(lx=0.0, ly=0.0, rx=0.0, ry=0.0):
     # ly inversé : dans ce jeu, l'axe avant/arrière du stick gauche est à l'envers
-    pad.left_joystick_float(x_value_float=lx, y_value_float=-ly)
-    pad.right_joystick_float(x_value_float=rx, y_value_float=ry)
+    pad.left_joystick_float(x_value_float=lx, y_value_float=-ly * SENS_Y)
+    pad.right_joystick_float(x_value_float=rx, y_value_float=ry * SENS_Y)
     pad.update()
 
 def tap(button, duree=0.12):
