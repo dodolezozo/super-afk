@@ -7,10 +7,80 @@ import random
 import time
 import threading
 import os
+import json
 
-# Type de manette virtuelle : "ps4" ou "xbox".
-# Si Fortnite ne détecte pas la manette sur un PC, essayer l'autre type.
-TYPE_MANETTE = "ps4"
+DOSSIER_SCRIPT = os.path.dirname(os.path.abspath(__file__))
+FICHIER_CONFIG = os.path.join(DOSSIER_SCRIPT, "config.json")
+
+# ---------- PARAMETRES (modifiables dans l'interface, enregistrés dans config.json) ----------
+
+PARAMETRES_DEFAUT = {
+    "TYPE_MANETTE": "ps4",        # "ps4" ou "xbox" (si Fortnite ne détecte pas la manette, essayer l'autre)
+    "DUREE_SESSION": 450.0,       # secondes
+    "DELAI_SEQUENCE": 1.0,        # secondes entre chaque touche de la séquence finale
+    "CONFIDENCE": 0.8,            # seuil de reconnaissance des images (0 à 1)
+    "INTERVALLE_SCAN": 0.3,       # secondes entre deux analyses de l'écran
+    "INTERVALLE_TRIANGLE": 1.2,   # délai entre deux appuis sur Triangle (menu / skip / replay)
+    "MONITEUR": 0,                # 1 = principal, 2 = secondaire, 0 = tous les écrans
+}
+
+def valider_parametres(brut):
+    """Convertit et vérifie les paramètres. Lève ValueError avec un message clair si invalide."""
+    p = {}
+    t = str(brut.get("TYPE_MANETTE", PARAMETRES_DEFAUT["TYPE_MANETTE"])).strip().lower()
+    if t not in ("ps4", "xbox"):
+        raise ValueError("Type de manette : « ps4 » ou « xbox »")
+    p["TYPE_MANETTE"] = t
+    bornes = {
+        "DUREE_SESSION": (1, 36000),
+        "DELAI_SEQUENCE": (0.05, 30),
+        "CONFIDENCE": (0.1, 1.0),
+        "INTERVALLE_SCAN": (0.05, 10),
+        "INTERVALLE_TRIANGLE": (0.1, 30),
+    }
+    for cle, (mini, maxi) in bornes.items():
+        try:
+            v = float(str(brut.get(cle, PARAMETRES_DEFAUT[cle])).replace(",", "."))
+        except ValueError:
+            raise ValueError(f"{cle} doit être un nombre")
+        if not mini <= v <= maxi:
+            raise ValueError(f"{cle} doit être entre {mini} et {maxi}")
+        p[cle] = v
+    try:
+        m = int(str(brut.get("MONITEUR", PARAMETRES_DEFAUT["MONITEUR"])))
+    except ValueError:
+        raise ValueError("MONITEUR doit être un nombre entier")
+    if not 0 <= m <= 9:
+        raise ValueError("MONITEUR doit être entre 0 et 9")
+    p["MONITEUR"] = m
+    return p
+
+def lire_config():
+    try:
+        with open(FICHIER_CONFIG, encoding="utf-8") as f:
+            return valider_parametres({**PARAMETRES_DEFAUT, **json.load(f)})
+    except FileNotFoundError:
+        return dict(PARAMETRES_DEFAUT)
+    except Exception as e:
+        print("config.json invalide, paramètres par défaut utilisés :", e)
+        return dict(PARAMETRES_DEFAUT)
+
+def parametres_actuels():
+    return {cle: globals()[cle] for cle in PARAMETRES_DEFAUT}
+
+def appliquer_parametres(brut, enregistrer=True):
+    """Valide, applique tout de suite (sauf le type de manette) et enregistre dans config.json."""
+    p = valider_parametres(brut)
+    for cle, v in p.items():
+        if cle != "TYPE_MANETTE":
+            globals()[cle] = v
+    if enregistrer:
+        with open(FICHIER_CONFIG, "w", encoding="utf-8") as f:
+            json.dump(p, f, indent=2, ensure_ascii=False)
+    return p
+
+globals().update(lire_config())
+MANETTE_CHARGEE = TYPE_MANETTE       # type réellement utilisé jusqu'au prochain redémarrage
 
 if TYPE_MANETTE == "xbox":
     pad = vg.VX360Gamepad()
@@ -43,15 +113,6 @@ session_active = False
 session_fin = 0.0
 sequence_en_cours = False
 
-DUREE_SESSION = 450          # secondes
-DELAI_SEQUENCE = 1.0         # secondes entre chaque touche de la séquence finale
-
-CONFIDENCE = 0.8
-INTERVALLE_SCAN = 0.3
-INTERVALLE_TRIANGLE = 1.2    # délai entre deux appuis sur Triangle (menu / skip / replay)
-MONITEUR = 0                 # 1 = principal, 2 = secondaire, 0 = tous les écrans
-
-DOSSIER_SCRIPT = os.path.dirname(os.path.abspath(__file__))
 DOSSIER_SCREENSHOTS = os.path.join(DOSSIER_SCRIPT, "Bangerang")
 os.makedirs(DOSSIER_SCREENSHOTS, exist_ok=True)
 
@@ -117,12 +178,47 @@ def charger(nom):
         raise FileNotFoundError(f"Image introuvable : {chemin}")
     return img
 
-template_menu = charger(IMAGE_MENU)
-template_searching = charger(IMAGE_SEARCHING)
-template_actif = charger(IMAGE_ACTIF)
-template_rewards = charger(IMAGE_REWARDS)
-template_replay = charger(IMAGE_REPLAY)
-template_skip = charger(IMAGE_SKIP)
+IMAGES = {               # nom de l'état -> fichier image à reconnaître
+    "menu": IMAGE_MENU,
+    "searching": IMAGE_SEARCHING,
+    "actif": IMAGE_ACTIF,
+    "rewards": IMAGE_REWARDS,
+    "replay": IMAGE_REPLAY,
+    "skip": IMAGE_SKIP,
+}
+DOSSIER_ANCIENNES = os.path.join(DOSSIER_SCRIPT, "anciennes_images")
+
+def recharger_templates():
+    """(Re)charge les six images de référence depuis le disque."""
+    global template_menu, template_searching, template_actif
+    global template_rewards, template_replay, template_skip
+    template_menu = charger(IMAGE_MENU)
+    template_searching = charger(IMAGE_SEARCHING)
+    template_actif = charger(IMAGE_ACTIF)
+    template_rewards = charger(IMAGE_REWARDS)
+    template_replay = charger(IMAGE_REPLAY)
+    template_skip = charger(IMAGE_SKIP)
+
+def remplacer_template(nom, image):
+    """Remplace l'image de référence `nom` (ex. "actif") par `image` (BGR).
+    L'ancienne image est gardée dans le dossier anciennes_images."""
+    fichier = IMAGES[nom]
+    chemin = os.path.join(DOSSIER_SCRIPT, fichier)
+    if os.path.exists(chemin):
+        os.makedirs(DOSSIER_ANCIENNES, exist_ok=True)
+        sauvegarde = os.path.join(DOSSIER_ANCIENNES,
+                                  time.strftime(f"{nom}_%Y-%m-%d_%H-%M-%S.png"))
+        with open(chemin, "rb") as src, open(sauvegarde, "wb") as dst:
+            dst.write(src.read())
+    ok, png = cv2.imencode(".png", image)
+    if not ok:
+        raise RuntimeError("Impossible d'encoder l'image")
+    with open(chemin, "wb") as f:
+        f.write(png.tobytes())
+    recharger_templates()
+    print(f"Image « {nom} » remplacée ({image.shape[1]}x{image.shape[0]})")
+
+recharger_templates()
 
 def score(frame, template):
     if frame.shape[0] < template.shape[0] or frame.shape[1] < template.shape[1]:
@@ -722,11 +818,21 @@ def boucle():
 
 # ---------- LANCEMENT ----------
 
-keyboard.add_hotkey("f9", toggle)
-keyboard.add_hotkey("f10", quitter)
-keyboard.add_hotkey("f8", lambda: threading.Thread(target=diagnostic, daemon=True).start())
+_demarre = False
 
-threading.Thread(target=surveillance, daemon=True).start()
-threading.Thread(target=boucle, daemon=True).start()
-print("Prêt : F9 = ON/OFF | F10 = quitter | F8 = diagnostic")
-keyboard.wait()
+def demarrer():
+    """Lance les raccourcis clavier et les deux threads du bot (une seule fois)."""
+    global _demarre
+    if _demarre:
+        return
+    _demarre = True
+    keyboard.add_hotkey("f9", toggle)
+    keyboard.add_hotkey("f10", quitter)
+    keyboard.add_hotkey("f8", lambda: threading.Thread(target=diagnostic, daemon=True).start())
+    threading.Thread(target=surveillance, daemon=True).start()
+    threading.Thread(target=boucle, daemon=True).start()
+    print("Prêt : F9 = ON/OFF | F10 = quitter | F8 = diagnostic")
+
+if __name__ == "__main__":
+    demarrer()
+    keyboard.wait()

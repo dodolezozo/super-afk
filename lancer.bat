@@ -1,4 +1,4 @@
 @echo off
 cd /d "%~dp0"
-python manette.py
-pause
+python interface.py
+if errorlevel 1 pause
