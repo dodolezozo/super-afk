@@ -22,6 +22,7 @@ PARAMETRES_DEFAUT = {
     "INTERVALLE_SCAN": 0.3,       # secondes entre deux analyses de l'écran
     "INTERVALLE_TRIANGLE": 1.2,   # délai entre deux appuis sur Triangle (menu / skip / replay)
     "MONITEUR": 0,                # 1 = principal, 2 = secondaire, 0 = tous les écrans
+    "SUICIDE": False,             # séquence spéciale quand bus.png est vu
 }
 
 def valider_parametres(brut):
@@ -53,6 +54,10 @@ def valider_parametres(brut):
     if not 0 <= m <= 9:
         raise ValueError("MONITEUR doit être entre 0 et 9")
     p["MONITEUR"] = m
+    s = brut.get("SUICIDE", PARAMETRES_DEFAUT["SUICIDE"])
+    if isinstance(s, str):
+        s = s.strip().lower() in ("1", "true", "vrai", "oui", "on")
+    p["SUICIDE"] = bool(s)
     return p
 
 def lire_config():
@@ -123,17 +128,27 @@ IMAGE_ACTIF = "actif.png"
 IMAGE_REWARDS = "rewards.png"
 IMAGE_REPLAY = "replay.png"
 IMAGE_SKIP = "skip.png"
+IMAGE_BUS = "bus.png"
 
+# Séquence « suicide » quand le bus est vu (en secondes)
+BUS_ATTENTE = 15          # attente avant de bouger
+BUS_POUSSEE = 10          # joystick gauche vers le haut
+BUS_AVANT_PLANEUR = 5     # attente avant de déployer le planeur
+
+bus_en_cours = False      # séquence bus en train de tourner
+bus_annule = False        # demande d'arrêt de la séquence bus
+bus_traite = False        # le bus actuellement à l'écran a déjà déclenché la séquence
 
 # ---------- OUTILS ----------
 
 def toggle():
-    global running, etat, session_active
+    global running, etat, session_active, bus_traite
     running = not running
     print("ON" if running else "OFF")
     if not running:
         etat = "rien"
         session_active = False
+        bus_traite = False
         pad.reset()
         pad.update()
 
@@ -167,8 +182,8 @@ def set_r2(valeur):
     pad.update()
 
 def alive():
-    """Les inputs de jeu tournent tant que la session est active."""
-    return running and session_active and not sequence_en_cours
+    """Les inputs de jeu tournent tant que la session est active (et hors séquence bus)."""
+    return running and session_active and not sequence_en_cours and not bus_en_cours
 
 # ---------- DETECTION ----------
 
@@ -186,19 +201,25 @@ IMAGES = {               # nom de l'état -> fichier image à reconnaître
     "rewards": IMAGE_REWARDS,
     "replay": IMAGE_REPLAY,
     "skip": IMAGE_SKIP,
+    "bus": IMAGE_BUS,
 }
 DOSSIER_ANCIENNES = os.path.join(DOSSIER_SCRIPT, "anciennes_images")
 
 def recharger_templates():
-    """(Re)charge les six images de référence depuis le disque."""
+    """(Re)charge les images de référence depuis le disque.
+    bus.png est facultative : sans elle, l'option suicide ne fait rien."""
     global template_menu, template_searching, template_actif
-    global template_rewards, template_replay, template_skip
+    global template_rewards, template_replay, template_skip, template_bus
     template_menu = charger(IMAGE_MENU)
     template_searching = charger(IMAGE_SEARCHING)
     template_actif = charger(IMAGE_ACTIF)
     template_rewards = charger(IMAGE_REWARDS)
     template_replay = charger(IMAGE_REPLAY)
     template_skip = charger(IMAGE_SKIP)
+    try:
+        template_bus = charger(IMAGE_BUS)
+    except FileNotFoundError:
+        template_bus = None
 
 def remplacer_template(nom, image):
     """Remplace l'image de référence `nom` (ex. "actif") par `image` (BGR).
@@ -371,11 +392,9 @@ def capturer(sct):
         print("Capture :", mode)
     return frame
 
-def detecter_etat(sct):
+def detecter_etat(frame):
     """Hors session : retourne l'état détecté, par ordre de priorité."""
     try:
-        frame = capturer(sct)
-
         if score(frame, template_replay) >= CONFIDENCE:
             return "replay"
         if score(frame, template_searching) >= CONFIDENCE:
@@ -393,10 +412,9 @@ def detecter_etat(sct):
         print("Erreur détection :", e)
         return "rien"
 
-def detecter_replay(sct):
+def detecter_replay(frame):
     """Pendant la session : ne cherche que replay.png."""
     try:
-        frame = capturer(sct)
         if score(frame, template_replay) >= CONFIDENCE:
             return "replay"
         return "session"
@@ -434,6 +452,8 @@ def diagnostic():
         templates = {"replay": template_replay, "searching": template_searching,
                      "menu": template_menu, "rewards": template_rewards,
                      "skip": template_skip, "actif": template_actif}
+        if template_bus is not None:
+            templates["bus"] = template_bus
         for nom, img in images.items():
             cv2.imwrite(os.path.join(dossier, f"{horo}_{nom}.png"), img)
             print(f"  {nom:8}", " ".join(f"{n}={score(img, t):.2f}" for n, t in templates.items()))
@@ -464,14 +484,62 @@ def fin_de_session():
 
 def annuler_session():
     """Annule la session en cours et remet la manette à zéro."""
-    global session_active
+    global session_active, bus_annule
     session_active = False
+    bus_annule = True
     time.sleep(0.3)          # laisse les actions en cours se terminer
     pad.reset()
     pad.update()
 
+def sequence_bus():
+    """Option suicide : met en pause les actions aléatoires (le timer de session continue),
+    attend BUS_ATTENTE s, pousse le joystick gauche vers le haut BUS_POUSSEE s,
+    attend BUS_AVANT_PLANEUR s, puis déploie le planeur (Croix)."""
+    global bus_en_cours, bus_annule
+    debut = time.time()
+
+    def continuer():
+        return running and not sequence_en_cours and not bus_annule
+
+    def attendre(secondes):
+        fin = time.time() + secondes
+        while time.time() < fin:
+            if not continuer():
+                return False
+            time.sleep(0.1)
+        return True
+
+    try:
+        print(f"Bus détecté : actions en pause, attente {BUS_ATTENTE:g} s")
+        time.sleep(0.3)                      # laisse l'action aléatoire en cours s'arrêter
+        if not continuer():
+            return
+        pad.reset()
+        pad.update()
+        if not attendre(BUS_ATTENTE - (time.time() - debut)):
+            return
+        print(f"Bus : joystick gauche vers le haut pendant {BUS_POUSSEE:g} s")
+        fin = time.time() + BUS_POUSSEE
+        while time.time() < fin:
+            if not continuer():
+                return
+            set_sticks(ly=1.0)
+            time.sleep(0.1)
+        set_sticks()
+        if not attendre(BUS_AVANT_PLANEUR):
+            return
+        print("Bus : déploiement du planeur")
+        tap(BTN_CROIX, 0.15)
+        print("Séquence bus terminée : reprise des actions")
+    finally:
+        if not continuer() and running:
+            print("Séquence bus interrompue")
+        if running and not sequence_en_cours:
+            set_sticks()
+        bus_en_cours = False
+
 def surveillance():
-    global etat, session_active, session_fin
+    global etat, session_active, session_fin, bus_en_cours, bus_annule, bus_traite
     dernier_triangle = 0
     rewards_traite = False
     with mss.MSS() as sct:
@@ -485,19 +553,37 @@ def surveillance():
                 fin_de_session()
                 continue
 
+            try:
+                frame = capturer(sct)
+            except Exception as e:
+                print("Erreur capture :", e)
+                time.sleep(INTERVALLE_SCAN)
+                continue
+
             # Pendant la session : uniquement replay.png ; sinon scan complet
             if session_active:
-                nouveau = detecter_replay(sct)
+                nouveau = detecter_replay(frame)
             else:
-                nouveau = detecter_etat(sct)
+                nouveau = detecter_etat(frame)
 
             if nouveau != etat:
                 etat = nouveau
                 print("État :", etat)
 
+            # ---- bus (option suicide) : lance la séquence une fois par apparition ----
+            bus_vu = (SUICIDE and template_bus is not None and etat != "replay"
+                      and score(frame, template_bus) >= CONFIDENCE)
+            if not bus_vu:
+                bus_traite = False
+            elif not bus_traite and not bus_en_cours:
+                bus_traite = True
+                bus_en_cours = True
+                bus_annule = False
+                threading.Thread(target=sequence_bus, daemon=True).start()
+
             # ---- replay : prioritaire, annule même la session ----
             if etat == "replay":
-                if session_active:
+                if session_active or bus_en_cours:
                     print("Replay détecté : session annulée")
                     annuler_session()
                 if time.time() - dernier_triangle >= INTERVALLE_TRIANGLE:
@@ -506,6 +592,10 @@ def surveillance():
 
             # ---- Pendant la session : tout le reste est ignoré ----
             elif session_active:
+                pass
+
+            # ---- Pendant la séquence bus (hors session) : seul « actif » compte ----
+            elif bus_en_cours and etat != "actif":
                 pass
 
             # ---- skip : Triangle (hors session) ----

@@ -36,6 +36,7 @@ sys.stderr = _Flux(sys.stderr)
 try:
     import cv2
     import mss
+    import numpy as np
     import threading
     import subprocess
     import mise_a_jour as maj
@@ -66,6 +67,7 @@ LIBELLES_PARAMETRES = [
     ("INTERVALLE_SCAN", "Intervalle d'analyse (s)"),
     ("INTERVALLE_TRIANGLE", "Délai entre deux Triangle (s)"),
     ("MONITEUR", "Écran surveillé (0 = tous)"),
+    ("SUICIDE", "Suicide (séquence quand le bus est vu)"),
 ]
 
 LIBELLES_IMAGES = {
@@ -75,6 +77,7 @@ LIBELLES_IMAGES = {
     "rewards": "Récompenses",
     "replay": "Replay",
     "skip": "Skip",
+    "bus": "Bus (option suicide)",
 }
 
 
@@ -240,17 +243,32 @@ class Interface(tk.Tk):
         self.capture_en_cours = False
 
         self._entete()
-        corps = tk.Frame(self, bg=FOND)
-        corps.pack(fill="both", padx=16, pady=(0, 4))
-        gauche = tk.Frame(corps, bg=FOND)
-        gauche.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
-        droite = tk.Frame(corps, bg=FOND)
-        droite.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
+        onglets = ttk.Notebook(self, style="Super.TNotebook")
+        onglets.pack(fill="both", expand=True, padx=16, pady=(0, 4))
 
+        # Onglet « Bot » : état, paramètres, journal
+        onglet_bot = tk.Frame(onglets, bg=FOND)
+        onglets.add(onglet_bot, text="  Bot  ")
+        gauche = tk.Frame(onglet_bot, bg=FOND)
+        gauche.grid(row=0, column=0, sticky="nsew", padx=(0, 8), pady=(12, 0))
+        droite = tk.Frame(onglet_bot, bg=FOND)
+        droite.grid(row=0, column=1, sticky="nsew", padx=(8, 0), pady=(12, 0))
         self._bloc_etat(gauche)
         self._bloc_parametres(gauche)
-        self._bloc_images(droite)
         self._bloc_journal(droite)
+
+        # Onglet « Images » : images de référence
+        onglet_images = tk.Frame(onglets, bg=FOND)
+        onglets.add(onglet_images, text="  Images  ")
+        cadre_images = tk.Frame(onglet_images, bg=FOND)
+        cadre_images.pack(fill="both", expand=True, pady=(12, 0))
+        self._bloc_images(cadre_images)
+
+        # Onglet « Récompenses » : screenshots du dossier Bangerang
+        onglet_rec = tk.Frame(onglets, bg=FOND)
+        onglets.add(onglet_rec, text="  Récompenses  ")
+        self._bloc_recompenses(onglet_rec)
+
         self._pied_de_page()
 
         bot.demarrer()
@@ -339,6 +357,18 @@ class Interface(tk.Tk):
         s.map("TCombobox", fieldbackground=[("readonly", CARTE)], foreground=[("readonly", TEXTE)])
         self.option_add("*TCombobox*Listbox.background", CARTE)
         self.option_add("*TCombobox*Listbox.foreground", TEXTE)
+        s.configure("Super.TNotebook", background=FOND, borderwidth=0, tabmargins=(0, 0, 0, 0),
+                    bordercolor=FOND, lightcolor=FOND, darkcolor=FOND)
+        s.configure("Super.TNotebook.Tab", background=CARTE, foreground=GRIS, borderwidth=0,
+                    padding=(14, 7), font=(POLICE, 10, "bold"),
+                    bordercolor=FOND, lightcolor=CARTE, darkcolor=CARTE)
+        s.map("Super.TNotebook.Tab", background=[("selected", BLEU), ("active", BORD)],
+              foreground=[("selected", "white"), ("active", TEXTE)],
+              lightcolor=[("selected", BLEU)], darkcolor=[("selected", BLEU)])
+        s.configure("Super.Vertical.TScrollbar", background=BORD, troughcolor=FOND,
+                    bordercolor=FOND, lightcolor=BORD, darkcolor=BORD, arrowcolor=TEXTE,
+                    gripcount=0)
+        s.map("Super.Vertical.TScrollbar", background=[("active", GRIS)])
 
     def _carte(self, parent, titre):
         cadre = tk.Frame(parent, bg=CARTE, highlightbackground=BORD, highlightthickness=1)
@@ -398,9 +428,16 @@ class Interface(tk.Tk):
         for i, (cle, texte) in enumerate(LIBELLES_PARAMETRES):
             tk.Label(c, text=texte, bg=CARTE, fg=TEXTE, font=(POLICE, 10)).grid(
                 row=i, column=0, sticky="w", pady=3)
-            var = tk.StringVar(value=formater(actuels[cle]))
+            if cle == "SUICIDE":
+                var = tk.BooleanVar(value=bool(actuels[cle]))
+            else:
+                var = tk.StringVar(value=formater(actuels[cle]))
             self.vars_param[cle] = var
-            if cle == "TYPE_MANETTE":
+            if cle == "SUICIDE":
+                champ = tk.Checkbutton(c, variable=var, bg=CARTE, activebackground=CARTE,
+                                       selectcolor=FOND, fg=TEXTE, activeforeground=TEXTE,
+                                       highlightthickness=0, bd=0, cursor="hand2")
+            elif cle == "TYPE_MANETTE":
                 champ = ttk.Combobox(c, textvariable=var, values=["ps4", "xbox"],
                                      state="readonly", width=10)
             else:
@@ -427,15 +464,26 @@ class Interface(tk.Tk):
             messagebox.showerror("super afk", f"Impossible d'enregistrer config.json :\n{e}", parent=self)
             return
         for cle, var in self.vars_param.items():
-            var.set(formater(p[cle]))
-        print("Paramètres enregistrés")
+            self._remplir(var, p[cle])
+        print("Paramètres enregistrés" + (" (suicide activé)" if p["SUICIDE"] else ""))
+        if p["SUICIDE"] and bot.template_bus is None:
+            messagebox.showwarning("super afk", "L'option suicide est activée mais l'image du bus "
+                                   "est absente (images/bus.png).\nFais-la dans l'onglet Images.",
+                                   parent=self)
         if p["TYPE_MANETTE"] != bot.MANETTE_CHARGEE:
             messagebox.showinfo("super afk", "Paramètres enregistrés.\n\nRelance super afk pour "
                                 f"passer à la manette « {p['TYPE_MANETTE']} ».", parent=self)
 
+    @staticmethod
+    def _remplir(var, valeur):
+        if isinstance(var, tk.BooleanVar):
+            var.set(bool(valeur))
+        else:
+            var.set(formater(valeur))
+
     def _defaut(self):
         for cle, var in self.vars_param.items():
-            var.set(formater(bot.PARAMETRES_DEFAUT[cle]))
+            self._remplir(var, bot.PARAMETRES_DEFAUT[cle])
         print("Valeurs par défaut remises dans les champs : clique sur Enregistrer pour les garder")
 
     # ----- images de référence -----
@@ -466,9 +514,16 @@ class Interface(tk.Tk):
 
     def _maj_vignettes(self):
         for nom, (vignette, taille) in self.vignettes.items():
-            img = getattr(bot, f"template_{nom}")
+            img = getattr(bot, f"template_{nom}", None)
+            if img is None:
+                vide = tk.PhotoImage(width=200, height=44)
+                vignette.configure(image=vide, text="absente", compound="center", fg=GRIS,
+                                   font=(POLICE, 9), width=200, height=44)
+                vignette.image = vide
+                taille.configure(text="—")
+                continue
             photo = image_tk(img, 200, 44)
-            vignette.configure(image=photo, width=200, height=44)
+            vignette.configure(image=photo, text="", width=200, height=44)
             vignette.image = photo
             taille.configure(text=f"{img.shape[1]}x{img.shape[0]}")
 
@@ -539,9 +594,110 @@ class Interface(tk.Tk):
         self.lift()
 
     # ----- journal -----
+    # ----- récompenses (screenshots du dossier Bangerang) -----
+    MAX_RECOMPENSES = 30
+
+    def _bloc_recompenses(self, parent):
+        haut = tk.Frame(parent, bg=FOND)
+        haut.pack(fill="x", pady=(12, 8))
+        self.lbl_rec = tk.Label(haut, text="", bg=FOND, fg=GRIS, font=(POLICE, 10))
+        self.lbl_rec.pack(side="left")
+        self._bouton(haut, "Ouvrir le dossier", self._ouvrir_bangerang, BORD).pack(side="right")
+
+        zone = tk.Frame(parent, bg=FOND)
+        zone.pack(fill="both", expand=True)
+        self.canvas_rec = tk.Canvas(zone, bg=FOND, highlightthickness=0, width=870, height=600)
+        barre = ttk.Scrollbar(zone, orient="vertical", command=self.canvas_rec.yview,
+                              style="Super.Vertical.TScrollbar")
+        self.canvas_rec.configure(yscrollcommand=barre.set)
+        barre.pack(side="right", fill="y")
+        self.canvas_rec.pack(side="left", fill="both", expand=True)
+        self.grille_rec = tk.Frame(self.canvas_rec, bg=FOND)
+        self.canvas_rec.create_window(0, 0, window=self.grille_rec, anchor="nw")
+        self.grille_rec.bind("<Configure>", lambda e: self.canvas_rec.configure(
+            scrollregion=self.canvas_rec.bbox("all")))
+        defiler = lambda e: self.canvas_rec.yview_scroll(int(-e.delta / 120), "units")
+        self.canvas_rec.bind("<Enter>", lambda e: self.canvas_rec.bind_all("<MouseWheel>", defiler))
+        self.canvas_rec.bind("<Leave>", lambda e: self.canvas_rec.unbind_all("<MouseWheel>"))
+
+        self._cache_rec = {}       # chemin -> (date de modif, PhotoImage)
+        self._signature_rec = None
+        self._maj_recompenses()
+
+    def _ouvrir_bangerang(self):
+        try:
+            os.startfile(bot.DOSSIER_SCREENSHOTS)
+        except OSError as e:
+            messagebox.showerror("super afk", f"Impossible d'ouvrir le dossier :\n{e}", parent=self)
+
+    def _maj_recompenses(self):
+        """Affiche les derniers screenshots de récompenses ; vérifie les nouveaux toutes les 3 s."""
+        try:
+            fichiers = []
+            for nom in os.listdir(bot.DOSSIER_SCREENSHOTS):
+                if nom.lower().endswith(".png"):
+                    chemin = os.path.join(bot.DOSSIER_SCREENSHOTS, nom)
+                    fichiers.append((os.path.getmtime(chemin), chemin))
+            fichiers.sort(reverse=True)
+        except OSError:
+            fichiers = []
+        total = len(fichiers)
+        fichiers = fichiers[:self.MAX_RECOMPENSES]
+        signature = tuple(fichiers)
+        if signature != self._signature_rec:
+            self._signature_rec = signature
+            self._afficher_recompenses(fichiers, total)
+        self.after(3000, self._maj_recompenses)
+
+    def _afficher_recompenses(self, fichiers, total):
+        for enfant in self.grille_rec.winfo_children():
+            enfant.destroy()
+        if total == 0:
+            self.lbl_rec.configure(text="Aucune récompense pour l'instant : les screenshots "
+                                        "apparaîtront ici automatiquement.")
+            return
+        texte = f"{total} récompense{'s' if total > 1 else ''}"
+        if total > len(fichiers):
+            texte += f" (les {len(fichiers)} plus récentes affichées)"
+        self.lbl_rec.configure(text=texte + "   •   clique sur une image pour l'ouvrir")
+        gardes = {}
+        for i, (mtime, chemin) in enumerate(fichiers):
+            photo = None
+            cache = self._cache_rec.get(chemin)
+            if cache and cache[0] == mtime:
+                photo = cache[1]
+            else:
+                try:
+                    img = cv2.imdecode(np.fromfile(chemin, dtype=np.uint8), cv2.IMREAD_COLOR)
+                    if img is not None:
+                        photo = image_tk(img, 270, 152)
+                except Exception:
+                    photo = None
+            if photo is not None:
+                gardes[chemin] = (mtime, photo)
+            carte = tk.Frame(self.grille_rec, bg=CARTE, highlightbackground=BORD, highlightthickness=1)
+            carte.grid(row=i // 3, column=i % 3, padx=(0, 12), pady=(0, 12), sticky="n")
+            if photo is not None:
+                image = tk.Label(carte, image=photo, bg=CARTE, cursor="hand2")
+            else:
+                image = tk.Label(carte, text="image illisible", bg=CARTE, fg=GRIS,
+                                 width=36, height=8)
+            image.pack(padx=8, pady=(8, 4))
+            date = time.strftime("%d/%m/%Y  %H:%M:%S", time.localtime(mtime))
+            tk.Label(carte, text=date, bg=CARTE, fg=TEXTE, font=(POLICE, 9)).pack(pady=(0, 8))
+            for w in (carte, image):
+                w.bind("<Button-1>", lambda e, c=chemin: self._ouvrir_image(c))
+        self._cache_rec = gardes
+
+    def _ouvrir_image(self, chemin):
+        try:
+            os.startfile(chemin)
+        except OSError as e:
+            messagebox.showerror("super afk", f"Impossible d'ouvrir l'image :\n{e}", parent=self)
+
     def _bloc_journal(self, parent):
         c = self._carte(parent, "JOURNAL")
-        self.journal = tk.Text(c, height=9, width=70, bg=FOND, fg=TEXTE, relief="flat",
+        self.journal = tk.Text(c, height=30, width=70, bg=FOND, fg=TEXTE, relief="flat",
                                font=("Consolas", 9), state="disabled", wrap="word",
                                highlightthickness=0)
         self.journal.pack(fill="both")
@@ -578,6 +734,8 @@ class Interface(tk.Tk):
             session = f"en cours, {reste // 60}:{reste % 60:02d} restantes"
         else:
             session = "aucune"
+        if bot.bus_en_cours:
+            session += " • séquence bus"
         self.lbl_infos["session"].configure(text=session)
         self.lbl_infos["capture"].configure(text=bot._mode_capture or "—")
         self.lbl_infos["manette"].configure(text=bot.MANETTE_CHARGEE)
