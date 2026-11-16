@@ -36,6 +36,9 @@ sys.stderr = _Flux(sys.stderr)
 try:
     import cv2
     import mss
+    import threading
+    import subprocess
+    import mise_a_jour as maj
     import manette as bot
 except Exception as e:  # ex. pilote ViGEmBus absent, image manquante...
     racine = tk.Tk()
@@ -238,7 +241,7 @@ class Interface(tk.Tk):
 
         self._entete()
         corps = tk.Frame(self, bg=FOND)
-        corps.pack(fill="both", padx=16, pady=(0, 16))
+        corps.pack(fill="both", padx=16, pady=(0, 4))
         gauche = tk.Frame(corps, bg=FOND)
         gauche.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
         droite = tk.Frame(corps, bg=FOND)
@@ -248,9 +251,84 @@ class Interface(tk.Tk):
         self._bloc_parametres(gauche)
         self._bloc_images(droite)
         self._bloc_journal(droite)
+        self._pied_de_page()
 
         bot.demarrer()
         self._rafraichir()
+        self._verifier_maj(silencieux=True)
+
+    # ----- version et mise à jour (en bas à droite) -----
+    def _pied_de_page(self):
+        pied = tk.Frame(self, bg=FOND)
+        pied.pack(fill="x", padx=16, pady=(0, 12))
+        self.btn_maj = self._bouton(pied, "Mettre à jour", self._verifier_maj, BORD)
+        self.btn_maj.pack(side="right")
+        tk.Label(pied, text=f"v{maj.version_locale()}", bg=FOND, fg=GRIS,
+                 font=(POLICE, 10, "bold")).pack(side="right", padx=10)
+        self.lbl_maj = tk.Label(pied, text="", bg=FOND, fg=GRIS, font=(POLICE, 9))
+        self.lbl_maj.pack(side="right")
+
+    def _en_fond(self, fonction, suite):
+        """Lance `fonction` dans un thread puis appelle `suite(ok, résultat)` dans l'interface."""
+        resultat = queue.Queue()
+        def travail():
+            try:
+                resultat.put((True, fonction()))
+            except Exception as e:
+                resultat.put((False, e))
+        threading.Thread(target=travail, daemon=True).start()
+        def attendre():
+            try:
+                ok, r = resultat.get_nowait()
+            except queue.Empty:
+                self.after(100, attendre)
+                return
+            suite(ok, r)
+        self.after(100, attendre)
+
+    def _verifier_maj(self, silencieux=False):
+        self.btn_maj.configure(state="disabled")
+        self.lbl_maj.configure(text="Vérification sur GitHub…", fg=GRIS)
+        self._en_fond(maj.version_distante, lambda ok, r: self._resultat_verif(ok, r, silencieux))
+
+    def _resultat_verif(self, ok, distante, silencieux):
+        self.btn_maj.configure(state="normal")
+        locale = maj.version_locale()
+        if not ok:
+            self.lbl_maj.configure(text="Vérification impossible", fg=ROUGE)
+            if not silencieux:
+                messagebox.showerror("super afk", f"Impossible de vérifier les mises à jour :\n{distante}",
+                                     parent=self)
+            return
+        if not maj.est_plus_recente(distante, locale):
+            self.lbl_maj.configure(text="À jour", fg=VERT)
+            if not silencieux:
+                messagebox.showinfo("super afk", f"Tu as déjà la dernière version (v{locale}).", parent=self)
+            return
+        self.lbl_maj.configure(text=f"v{distante} disponible", fg="#ffd166")
+        print(f"Nouvelle version disponible : v{distante} (tu as v{locale})")
+        if silencieux:
+            return
+        if messagebox.askyesno("super afk",
+                               f"La version v{distante} est disponible (tu as v{locale}).\n\n"
+                               "Installer la mise à jour ?\n"
+                               "Tes paramètres, tes images de référence et tes screenshots sont gardés.",
+                               parent=self):
+            self.btn_maj.configure(state="disabled")
+            self.lbl_maj.configure(text="Installation…", fg=GRIS)
+            self._en_fond(maj.mettre_a_jour, self._resultat_maj)
+
+    def _resultat_maj(self, ok, message):
+        self.btn_maj.configure(state="normal")
+        if not ok:
+            self.lbl_maj.configure(text="Échec de la mise à jour", fg=ROUGE)
+            messagebox.showerror("super afk", f"La mise à jour a échoué :\n{message}", parent=self)
+            return
+        self.lbl_maj.configure(text="Mise à jour installée", fg=VERT)
+        print(message)
+        if messagebox.askyesno("super afk", f"{message}\n\nRedémarrer super afk maintenant ?", parent=self):
+            subprocess.Popen([sys.executable, os.path.join(maj.DOSSIER, "interface.py")], cwd=maj.DOSSIER)
+            bot.quitter()
 
     # ----- style -----
     def _style(self):
