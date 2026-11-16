@@ -2,9 +2,10 @@
 
 tim sweeney is a cuck
 
-![goy](goy.png)
+![goy](images/goy.png)
 
-## Dépendances
+## Installation
 
 - https://github.com/nefarius/ViGEmBus/releases/tag/v1.22.0
-- https://www.python.org/downloads/release/pymanager-264/
+- https://www.python.org/downloads/release/python-3152/
+- Lancer install.bat

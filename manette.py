@@ -113,6 +113,7 @@ session_active = False
 session_fin = 0.0
 sequence_en_cours = False
 
+DOSSIER_IMAGES = os.path.join(DOSSIER_SCRIPT, "images")       # images de référence
 DOSSIER_SCREENSHOTS = os.path.join(DOSSIER_SCRIPT, "Bangerang")
 os.makedirs(DOSSIER_SCREENSHOTS, exist_ok=True)
 
@@ -172,7 +173,7 @@ def alive():
 # ---------- DETECTION ----------
 
 def charger(nom):
-    chemin = os.path.join(DOSSIER_SCRIPT, nom)
+    chemin = os.path.join(DOSSIER_IMAGES, nom)
     img = cv2.imread(chemin, cv2.IMREAD_COLOR)
     if img is None:
         raise FileNotFoundError(f"Image introuvable : {chemin}")
@@ -203,7 +204,7 @@ def remplacer_template(nom, image):
     """Remplace l'image de référence `nom` (ex. "actif") par `image` (BGR).
     L'ancienne image est gardée dans le dossier anciennes_images."""
     fichier = IMAGES[nom]
-    chemin = os.path.join(DOSSIER_SCRIPT, fichier)
+    chemin = os.path.join(DOSSIER_IMAGES, fichier)
     if os.path.exists(chemin):
         os.makedirs(DOSSIER_ANCIENNES, exist_ok=True)
         sauvegarde = os.path.join(DOSSIER_ANCIENNES,
