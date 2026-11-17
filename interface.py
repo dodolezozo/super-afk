@@ -64,11 +64,21 @@ LIBELLES_PARAMETRES = [
     ("DUREE_SESSION", "Durée d'une session (s)"),
     ("DELAI_SEQUENCE", "Délai séquence finale (s)"),
     ("CONFIDENCE", "Seuil de reconnaissance (0 à 1)"),
+    ("MARGE_ECHELLE", "Marge de taille des images (%)"),
     ("INTERVALLE_SCAN", "Intervalle d'analyse (s)"),
     ("INTERVALLE_TRIANGLE", "Délai entre deux Triangle (s)"),
     ("MONITEUR", "Écran surveillé (0 = tous)"),
-    ("SUICIDE", "Suicide (séquence quand le bus est vu)"),
 ]
+
+LIBELLES_SUICIDE = [
+    ("SUICIDE", "Activer le suicide"),
+    ("BUS_ATTENTE", "Attente dans le bus avant d'agir (s)"),
+    ("BUS_SAUTER", "Sauter du bus (Croix) après l'attente"),
+    ("BUS_POUSSEE", "Plongée : joystick gauche vers le haut (s)"),
+    ("BUS_AVANT_PLANEUR", "Attente avant de déployer le planeur (s)"),
+]
+
+PARAMETRES_BOOLEENS = {"SUICIDE", "BUS_SAUTER"}
 
 LIBELLES_IMAGES = {
     "menu": "Menu (bouton Play)",
@@ -254,8 +264,12 @@ class Interface(tk.Tk):
         droite = tk.Frame(onglet_bot, bg=FOND)
         droite.grid(row=0, column=1, sticky="nsew", padx=(8, 0), pady=(12, 0))
         self._bloc_etat(gauche)
-        self._bloc_parametres(gauche)
         self._bloc_journal(droite)
+
+        # Onglet « Paramètres »
+        onglet_param = tk.Frame(onglets, bg=FOND)
+        onglets.add(onglet_param, text="  Paramètres  ")
+        self._bloc_parametres(onglet_param)
 
         # Onglet « Images » : images de référence
         onglet_images = tk.Frame(onglets, bg=FOND)
@@ -404,14 +418,15 @@ class Interface(tk.Tk):
         self.lbl_marche.grid(row=0, column=0, columnspan=2, sticky="w")
         self.lbl_infos = {}
         for i, (cle, texte) in enumerate([("etat", "État"), ("session", "Session"),
-                                          ("capture", "Capture"), ("manette", "Manette")], start=1):
+                                          ("capture", "Capture"), ("echelle", "Échelle"),
+                                          ("manette", "Manette")], start=1):
             tk.Label(c, text=texte, bg=CARTE, fg=GRIS, font=(POLICE, 10)).grid(
                 row=i, column=0, sticky="w", pady=1)
             lbl = tk.Label(c, text="", bg=CARTE, fg=TEXTE, font=(POLICE, 10, "bold"))
             lbl.grid(row=i, column=1, sticky="w", padx=(12, 0), pady=1)
             self.lbl_infos[cle] = lbl
         boutons = tk.Frame(c, bg=CARTE)
-        boutons.grid(row=5, column=0, columnspan=2, sticky="w", pady=(10, 0))
+        boutons.grid(row=6, column=0, columnspan=2, sticky="w", pady=(10, 0))
         self.btn_marche = self._bouton(boutons, "Démarrer", bot.toggle, VERT, largeur=10)
         self.btn_marche.pack(side="left")
         self._bouton(boutons, "Diagnostic", self._diagnostic, BORD).pack(side="left", padx=8)
@@ -422,34 +437,54 @@ class Interface(tk.Tk):
         threading.Thread(target=bot.diagnostic, daemon=True).start()
 
     # ----- paramètres -----
-    def _bloc_parametres(self, parent):
-        c = self._carte(parent, "PARAMÈTRES")
-        actuels = bot.lire_config()
-        for i, (cle, texte) in enumerate(LIBELLES_PARAMETRES):
+    def _champs(self, c, libelles, actuels):
+        """Une ligne « libellé + champ » par paramètre, dans la carte c."""
+        for i, (cle, texte) in enumerate(libelles):
             tk.Label(c, text=texte, bg=CARTE, fg=TEXTE, font=(POLICE, 10)).grid(
                 row=i, column=0, sticky="w", pady=3)
-            if cle == "SUICIDE":
+            if cle in PARAMETRES_BOOLEENS:
                 var = tk.BooleanVar(value=bool(actuels[cle]))
-            else:
-                var = tk.StringVar(value=formater(actuels[cle]))
-            self.vars_param[cle] = var
-            if cle == "SUICIDE":
                 champ = tk.Checkbutton(c, variable=var, bg=CARTE, activebackground=CARTE,
                                        selectcolor=FOND, fg=TEXTE, activeforeground=TEXTE,
                                        highlightthickness=0, bd=0, cursor="hand2")
             elif cle == "TYPE_MANETTE":
+                var = tk.StringVar(value=formater(actuels[cle]))
                 champ = ttk.Combobox(c, textvariable=var, values=["ps4", "xbox"],
                                      state="readonly", width=10)
             else:
+                var = tk.StringVar(value=formater(actuels[cle]))
                 champ = tk.Entry(c, textvariable=var, width=12, bg=FOND, fg=TEXTE,
                                  insertbackground=TEXTE, relief="flat",
                                  highlightbackground=BORD, highlightthickness=1)
-            champ.grid(row=i, column=1, sticky="w", padx=(12, 0), pady=3)
+            self.vars_param[cle] = var
+            champ.grid(row=i, column=1, sticky="w", padx=(16, 0), pady=3)
+        return len(libelles)
+
+    def _bloc_parametres(self, parent):
+        actuels = bot.lire_config()
+        colonnes = tk.Frame(parent, bg=FOND)
+        colonnes.pack(fill="x", pady=(12, 0))
+        gauche = tk.Frame(colonnes, bg=FOND)
+        gauche.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
+        droite = tk.Frame(colonnes, bg=FOND)
+        droite.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
+
+        c = self._carte(gauche, "GÉNÉRAL")
+        n = self._champs(c, LIBELLES_PARAMETRES, actuels)
         tk.Label(c, text="Le type de manette s'applique au prochain lancement.",
                  bg=CARTE, fg=GRIS, font=(POLICE, 9)).grid(
-            row=len(LIBELLES_PARAMETRES), column=0, columnspan=2, sticky="w", pady=(6, 0))
-        boutons = tk.Frame(c, bg=CARTE)
-        boutons.grid(row=len(LIBELLES_PARAMETRES) + 1, column=0, columnspan=2, sticky="w", pady=(8, 0))
+            row=n, column=0, columnspan=2, sticky="w", pady=(6, 0))
+
+        c = self._carte(droite, "SUICIDE (BUS)")
+        n = self._champs(c, LIBELLES_SUICIDE, actuels)
+        tk.Label(c, justify="left", bg=CARTE, fg=GRIS, font=(POLICE, 9), wraplength=380,
+                 text="Quand l'image du bus est reconnue : les actions aléatoires se mettent en "
+                      "pause (le timer de session continue), puis attente → saut (si coché) → "
+                      "plongée → attente → planeur (Croix), puis les actions reprennent."
+                 ).grid(row=n, column=0, columnspan=2, sticky="w", pady=(8, 0))
+
+        boutons = tk.Frame(parent, bg=FOND)
+        boutons.pack(fill="x")
         self._bouton(boutons, "Enregistrer", self._enregistrer).pack(side="left")
         self._bouton(boutons, "Valeurs par défaut", self._defaut, BORD).pack(side="left", padx=8)
 
@@ -697,7 +732,7 @@ class Interface(tk.Tk):
 
     def _bloc_journal(self, parent):
         c = self._carte(parent, "JOURNAL")
-        self.journal = tk.Text(c, height=30, width=70, bg=FOND, fg=TEXTE, relief="flat",
+        self.journal = tk.Text(c, height=36, width=70, bg=FOND, fg=TEXTE, relief="flat",
                                font=("Consolas", 9), state="disabled", wrap="word",
                                highlightthickness=0)
         self.journal.pack(fill="both")
@@ -739,6 +774,11 @@ class Interface(tk.Tk):
         self.lbl_infos["session"].configure(text=session)
         self.lbl_infos["capture"].configure(text=bot._mode_capture or "—")
         self.lbl_infos["manette"].configure(text=bot.MANETTE_CHARGEE)
+        if bot.MARGE_ECHELLE > 0:
+            self.lbl_infos["echelle"].configure(
+                text=f"x{bot.echelle_connue:g}  (marge ±{bot.MARGE_ECHELLE:g} %)")
+        else:
+            self.lbl_infos["echelle"].configure(text="taille exacte uniquement")
         self.after(200, self._rafraichir)
 
 

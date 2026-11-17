@@ -22,8 +22,27 @@ PARAMETRES_DEFAUT = {
     "INTERVALLE_SCAN": 0.3,       # secondes entre deux analyses de l'écran
     "INTERVALLE_TRIANGLE": 1.2,   # délai entre deux appuis sur Triangle (menu / skip / replay)
     "MONITEUR": 0,                # 1 = principal, 2 = secondaire, 0 = tous les écrans
+    "MARGE_ECHELLE": 15.0,        # % de différence de taille toléré pour les images (0 = taille exacte)
     "SUICIDE": False,             # séquence spéciale quand bus.png est vu
+    # Séquence suicide (en secondes)
+    "BUS_ATTENTE": 15.0,          # attente dans le bus avant de bouger
+    "BUS_SAUTER": False,          # appuyer sur Croix pour sauter du bus à la fin de l'attente
+    "BUS_POUSSEE": 10.0,          # joystick gauche vers le haut (plongée)
+    "BUS_AVANT_PLANEUR": 5.0,     # attente avant de déployer le planeur
 }
+
+NOMS_PARAMETRES = {               # pour des messages d'erreur lisibles
+    "MARGE_ECHELLE": "Marge de taille", "DUREE_SESSION": "Durée d'une session",
+    "DELAI_SEQUENCE": "Délai séquence finale", "CONFIDENCE": "Seuil de reconnaissance",
+    "INTERVALLE_SCAN": "Intervalle d'analyse", "INTERVALLE_TRIANGLE": "Délai entre deux Triangle",
+    "MONITEUR": "Écran surveillé", "BUS_ATTENTE": "Attente dans le bus",
+    "BUS_POUSSEE": "Durée de la plongée", "BUS_AVANT_PLANEUR": "Attente avant le planeur",
+}
+
+def _booleen(v):
+    if isinstance(v, str):
+        return v.strip().lower() in ("1", "true", "vrai", "oui", "on")
+    return bool(v)
 
 def valider_parametres(brut):
     """Convertit et vérifie les paramètres. Lève ValueError avec un message clair si invalide."""
@@ -33,31 +52,34 @@ def valider_parametres(brut):
         raise ValueError("Type de manette : « ps4 » ou « xbox »")
     p["TYPE_MANETTE"] = t
     bornes = {
+        "MARGE_ECHELLE": (0, 50),
         "DUREE_SESSION": (1, 36000),
         "DELAI_SEQUENCE": (0.05, 30),
         "CONFIDENCE": (0.1, 1.0),
         "INTERVALLE_SCAN": (0.05, 10),
         "INTERVALLE_TRIANGLE": (0.1, 30),
+        "BUS_ATTENTE": (0, 300),
+        "BUS_POUSSEE": (0, 300),
+        "BUS_AVANT_PLANEUR": (0, 300),
     }
     for cle, (mini, maxi) in bornes.items():
+        nom = NOMS_PARAMETRES.get(cle, cle)
         try:
             v = float(str(brut.get(cle, PARAMETRES_DEFAUT[cle])).replace(",", "."))
         except ValueError:
-            raise ValueError(f"{cle} doit être un nombre")
+            raise ValueError(f"{nom} doit être un nombre")
         if not mini <= v <= maxi:
-            raise ValueError(f"{cle} doit être entre {mini} et {maxi}")
+            raise ValueError(f"{nom} doit être entre {mini:g} et {maxi:g}")
         p[cle] = v
     try:
         m = int(str(brut.get("MONITEUR", PARAMETRES_DEFAUT["MONITEUR"])))
     except ValueError:
-        raise ValueError("MONITEUR doit être un nombre entier")
+        raise ValueError("Écran surveillé doit être un nombre entier")
     if not 0 <= m <= 9:
-        raise ValueError("MONITEUR doit être entre 0 et 9")
+        raise ValueError("Écran surveillé doit être entre 0 et 9")
     p["MONITEUR"] = m
-    s = brut.get("SUICIDE", PARAMETRES_DEFAUT["SUICIDE"])
-    if isinstance(s, str):
-        s = s.strip().lower() in ("1", "true", "vrai", "oui", "on")
-    p["SUICIDE"] = bool(s)
+    for cle in ("SUICIDE", "BUS_SAUTER"):
+        p[cle] = _booleen(brut.get(cle, PARAMETRES_DEFAUT[cle]))
     return p
 
 def lire_config():
@@ -131,9 +153,7 @@ IMAGE_SKIP = "skip.png"
 IMAGE_BUS = "bus.png"
 
 # Séquence « suicide » quand le bus est vu (en secondes)
-BUS_ATTENTE = 15          # attente avant de bouger
-BUS_POUSSEE = 10          # joystick gauche vers le haut
-BUS_AVANT_PLANEUR = 5     # attente avant de déployer le planeur
+# (durées réglables : BUS_ATTENTE, BUS_SAUTER, BUS_POUSSEE, BUS_AVANT_PLANEUR dans PARAMETRES_DEFAUT)
 
 bus_en_cours = False      # séquence bus en train de tourner
 bus_annule = False        # demande d'arrêt de la séquence bus
@@ -220,6 +240,9 @@ def recharger_templates():
         template_bus = charger(IMAGE_BUS)
     except FileNotFoundError:
         template_bus = None
+    _versions.clear()
+
+_versions = {}   # images redimensionnées : (id image, échelle) -> (image d'origine, image redimensionnée)
 
 def remplacer_template(nom, image):
     """Remplace l'image de référence `nom` (ex. "actif") par `image` (BGR).
@@ -247,6 +270,83 @@ def score(frame, template):
         return 0.0
     res = cv2.matchTemplate(frame, template, cv2.TM_CCOEFF_NORMED)
     return res.max()
+
+# ---------- DETECTION MULTI-ECHELLE ----------
+# Les images peuvent apparaître un peu plus grandes ou plus petites que les images de
+# référence (autre résolution, fenêtre, échelle de l'interface Fortnite...).
+# On teste donc plusieurs tailles, dans la marge MARGE_ECHELLE (%).
+# Pour rester rapide :
+#  - l'analyse se fait sur l'image réduite de moitié (REDUCTION) ;
+#  - la taille qui a marché la dernière fois (echelle_connue) est testée à chaque analyse,
+#    plus UNE autre taille de la marge, différente à chaque analyse (rotation).
+#    Toutes les tailles sont donc essayées en quelques analyses, puis la bonne est retenue.
+
+REDUCTION = 0.5
+PAS_ECHELLE = 0.05
+echelle_connue = 1.0
+_rotation = 0
+
+def echelles_possibles():
+    marge = MARGE_ECHELLE / 100.0
+    if marge <= 0:
+        return [1.0]
+    n = max(1, int(round(marge / PAS_ECHELLE)))
+    return [round(1.0 + marge * k / n, 3) for k in range(-n, n + 1)]
+
+def echelles_a_tester():
+    """Échelle retenue + une autre de la marge (qui change à chaque appel)."""
+    global echelle_connue, _rotation
+    toutes = echelles_possibles()
+    if echelle_connue not in toutes:
+        echelle_connue = min(toutes, key=lambda e: abs(e - echelle_connue))
+    autres = [e for e in toutes if e != echelle_connue]
+    _rotation += 1
+    if not autres:
+        return [echelle_connue]
+    return [echelle_connue, autres[_rotation % len(autres)]]
+
+def preparer(frame):
+    """Image d'écran réduite, utilisée pour toutes les comparaisons."""
+    return cv2.resize(frame, None, fx=REDUCTION, fy=REDUCTION, interpolation=cv2.INTER_AREA)
+
+def _version(template, echelle):
+    cle = (id(template), echelle)
+    trouve = _versions.get(cle)
+    if trouve is not None and trouve[0] is template:
+        return trouve[1]
+    k = echelle * REDUCTION
+    h, w = template.shape[:2]
+    taille = (max(1, int(round(w * k))), max(1, int(round(h * k))))
+    redim = cv2.resize(template, taille, interpolation=cv2.INTER_AREA if k < 1 else cv2.INTER_LINEAR)
+    if len(_versions) > 500:
+        _versions.clear()
+    _versions[cle] = (template, redim)
+    return redim
+
+def trouver(frame_r, template, echelles):
+    """Meilleur score de `template` dans l'image réduite, et l'échelle qui l'a donné."""
+    meilleur, echelle_meilleure = 0.0, echelles[0]
+    for e in echelles:
+        t = _version(template, e)
+        if min(t.shape[:2]) < 4:
+            continue
+        s = float(score(frame_r, t))
+        if s > meilleur:
+            meilleur, echelle_meilleure = s, e
+    return meilleur, echelle_meilleure
+
+def reconnu(frame_r, template, echelles):
+    """Vrai si l'image est reconnue ; retient alors l'échelle qui a marché."""
+    global echelle_connue
+    if template is None:
+        return False
+    s, e = trouver(frame_r, template, echelles)
+    if s < CONFIDENCE:
+        return False
+    if e != echelle_connue:
+        echelle_connue = e
+        print(f"Échelle des images détectée : x{e:g}")
+    return True
 
 # ---------- CAPTURE DE LA FENETRE FORTNITE (même si elle n'a pas le focus) ----------
 
@@ -392,30 +492,31 @@ def capturer(sct):
         print("Capture :", mode)
     return frame
 
-def detecter_etat(frame):
-    """Hors session : retourne l'état détecté, par ordre de priorité."""
+def detecter_etat(frame_r, echelles):
+    """Hors session : retourne l'état détecté, par ordre de priorité.
+    frame_r = image réduite (preparer), echelles = echelles_a_tester()."""
     try:
-        if score(frame, template_replay) >= CONFIDENCE:
+        if reconnu(frame_r, template_replay, echelles):
             return "replay"
-        if score(frame, template_searching) >= CONFIDENCE:
+        if reconnu(frame_r, template_searching, echelles):
             return "searching"
-        if score(frame, template_menu) >= CONFIDENCE:
+        if reconnu(frame_r, template_menu, echelles):
             return "menu"
-        if score(frame, template_rewards) >= CONFIDENCE:
+        if reconnu(frame_r, template_rewards, echelles):
             return "rewards"
-        if score(frame, template_skip) >= CONFIDENCE:
+        if reconnu(frame_r, template_skip, echelles):
             return "skip"
-        if score(frame, template_actif) >= CONFIDENCE:
+        if reconnu(frame_r, template_actif, echelles):
             return "actif"
         return "rien"
     except Exception as e:
         print("Erreur détection :", e)
         return "rien"
 
-def detecter_replay(frame):
+def detecter_replay(frame_r, echelles):
     """Pendant la session : ne cherche que replay.png."""
     try:
-        if score(frame, template_replay) >= CONFIDENCE:
+        if reconnu(frame_r, template_replay, echelles):
             return "replay"
         return "session"
     except Exception as e:
@@ -456,8 +557,14 @@ def diagnostic():
             templates["bus"] = template_bus
         for nom, img in images.items():
             cv2.imwrite(os.path.join(dossier, f"{horo}_{nom}.png"), img)
-            print(f"  {nom:8}", " ".join(f"{n}={score(img, t):.2f}" for n, t in templates.items()))
-        print(f"  (seuil = {CONFIDENCE}) images dans : {dossier}")
+            img_r = preparer(img)
+            resultats = []
+            for n, t in templates.items():
+                s, e = trouver(img_r, t, echelles_possibles())   # toutes les tailles de la marge
+                resultats.append(f"{n}={s:.2f}(x{e:g})")
+            print(f"  {nom:8}", " ".join(resultats))
+        print(f"  (seuil = {CONFIDENCE}, marge ±{MARGE_ECHELLE:g} %, échelle retenue x{echelle_connue:g})"
+              f" images dans : {dossier}")
     except Exception as e:
         print("Erreur diagnostic :", e)
 
@@ -493,10 +600,12 @@ def annuler_session():
 
 def sequence_bus():
     """Option suicide : met en pause les actions aléatoires (le timer de session continue),
-    attend BUS_ATTENTE s, pousse le joystick gauche vers le haut BUS_POUSSEE s,
-    attend BUS_AVANT_PLANEUR s, puis déploie le planeur (Croix)."""
+    attend BUS_ATTENTE s, saute du bus (Croix) si BUS_SAUTER, pousse le joystick gauche
+    vers le haut BUS_POUSSEE s, attend BUS_AVANT_PLANEUR s, puis déploie le planeur (Croix)."""
     global bus_en_cours, bus_annule
     debut = time.time()
+    # Réglages lus une seule fois : les modifier pendant la séquence ne la perturbe pas
+    attente, sauter, poussee, avant_planeur = BUS_ATTENTE, BUS_SAUTER, BUS_POUSSEE, BUS_AVANT_PLANEUR
 
     def continuer():
         return running and not sequence_en_cours and not bus_annule
@@ -510,23 +619,26 @@ def sequence_bus():
         return True
 
     try:
-        print(f"Bus détecté : actions en pause, attente {BUS_ATTENTE:g} s")
+        print(f"Bus détecté : actions en pause, attente {attente:g} s")
         time.sleep(0.3)                      # laisse l'action aléatoire en cours s'arrêter
         if not continuer():
             return
         pad.reset()
         pad.update()
-        if not attendre(BUS_ATTENTE - (time.time() - debut)):
+        if not attendre(attente - (time.time() - debut)):
             return
-        print(f"Bus : joystick gauche vers le haut pendant {BUS_POUSSEE:g} s")
-        fin = time.time() + BUS_POUSSEE
+        if sauter:
+            print("Bus : saut du bus (Croix)")
+            tap(BTN_CROIX, 0.15)
+        print(f"Bus : joystick gauche vers le haut pendant {poussee:g} s")
+        fin = time.time() + poussee
         while time.time() < fin:
             if not continuer():
                 return
             set_sticks(ly=1.0)
             time.sleep(0.1)
         set_sticks()
-        if not attendre(BUS_AVANT_PLANEUR):
+        if not attendre(avant_planeur):
             return
         print("Bus : déploiement du planeur")
         tap(BTN_CROIX, 0.15)
@@ -560,11 +672,14 @@ def surveillance():
                 time.sleep(INTERVALLE_SCAN)
                 continue
 
+            frame_r = preparer(frame)
+            echelles = echelles_a_tester()
+
             # Pendant la session : uniquement replay.png ; sinon scan complet
             if session_active:
-                nouveau = detecter_replay(frame)
+                nouveau = detecter_replay(frame_r, echelles)
             else:
-                nouveau = detecter_etat(frame)
+                nouveau = detecter_etat(frame_r, echelles)
 
             if nouveau != etat:
                 etat = nouveau
@@ -572,7 +687,7 @@ def surveillance():
 
             # ---- bus (option suicide) : lance la séquence une fois par apparition ----
             bus_vu = (SUICIDE and template_bus is not None and etat != "replay"
-                      and score(frame, template_bus) >= CONFIDENCE)
+                      and reconnu(frame_r, template_bus, echelles))
             if not bus_vu:
                 bus_traite = False
             elif not bus_traite and not bus_en_cours:
